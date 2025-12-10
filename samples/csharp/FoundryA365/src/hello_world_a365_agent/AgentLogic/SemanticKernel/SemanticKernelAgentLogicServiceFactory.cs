@@ -7,9 +7,11 @@ using HelloWorldA365.Mcp;
 using HelloWorldA365.Models; // added for PresenceState
 using HelloWorldA365.Services;
 using Microsoft.Agents.A365.Tooling.Extensions.SemanticKernel.Services;
+using Microsoft.Agents.A365.Tooling.Handlers;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Builder.App.UserAuth;
 using Microsoft.SemanticKernel;
+using ModelContextProtocol.Client;
 
 /// <summary>
 /// There are still some work left here:
@@ -64,6 +66,13 @@ public sealed class SemanticKernelAgentLogicServiceFactory(
         string authHandlerName = string.Empty;
 
         await mcpToolRegistrationService.AddToolServersToAgentAsync(kernel, userAuthorization, authHandlerName, turnContext, accessToken.Token);
+
+        var mcpClient = await CreateMcpClientWithAuthHandlers(new Uri("https://zava-api.icysand-d49b587e.northcentralusstage.azurecontainerapps.io/mcp"), accessToken.Token);
+        var tools = await mcpClient.ListToolsAsync();
+
+        logger.LogInformation($"Successfully retrieved {tools.Count} tools from mcp_Zava");
+
+        kernel.Plugins.AddFromFunctions("mcp_Zava", tools.Select(x => x.AsKernelFunction()));
     }
 
     private IKernelBuilder AddModel(IKernelBuilder kernelBuilder)
@@ -79,5 +88,40 @@ public sealed class SemanticKernelAgentLogicServiceFactory(
             // Ensure token is always picked up from terminal
             new DefaultAzureCredential()
         );
+    }
+
+    private async Task<IMcpClient> CreateMcpClientWithAuthHandlers(Uri endpoint, string authToken)
+    {
+        // Create HTTP client handler chain for MCP service authentication
+        var httpClientHandler = new HttpClientHandler();
+        // Create a simple authentication handler that adds the bearer token
+        var authHandler = new BearerTokenHandler(authToken)
+        {
+            InnerHandler = httpClientHandler
+        };
+        logger.LogInformation($"Configured authentication handler for MCP endpoint {endpoint}");
+        // Create logging handler (optional - for debugging HTTP requests)
+        var loggingHandler = new HttpLoggingHandler(logger)
+        {
+            InnerHandler = authHandler
+        };
+        // Setup SSE client transport options without manual token management
+        var options = new SseClientTransportOptions
+        {
+            Endpoint = endpoint,
+            TransportMode = HttpTransportMode.AutoDetect,
+        };
+        // Create HTTP client with the authentication handler chain
+
+        var httpClient = new HttpClient(loggingHandler);
+        var clientTransport = new SseClientTransport(options, httpClient);
+        try
+        {
+            return await McpClientFactory.CreateAsync(clientTransport);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to create MCP client for endpoint '{endpoint}': {ex.Message}", ex);
+        }
     }
 }
